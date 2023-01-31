@@ -7,7 +7,7 @@ on:
       working-directory:
         description: "Directory to run Terraform commands from, if not the root directory of the repository. Also used for state file S3 prefix."
         type: string
-        default: "."
+        default: '.'
       environment:
         description: "Deployment environment. Must match a named environment in the calling workflow."
         required: true
@@ -16,10 +16,10 @@ on:
         description: "Version of Terraform to use."
         required: true
         type: string
-      ignore-directories:
-        description: "Subdirectories of 'working-directory' to ignore when zipping Terraform config and plan files."
+      exclude-files:
+        description: "Files or subdirectories of 'working-directory' to exclude when zipping Terraform config and plan files."
         type: string
-        default: ".git"
+        default: '.git'
       comment-on-plan:
         description: "Whether to add a comment to the pull request with details of the planned changes."
         type: boolean
@@ -158,7 +158,7 @@ jobs:
         run: exit 1
 
       - name: Zip Terraform plan and config files
-        run: zip -r config.zip . -x ".git*" "backend*"
+        run: zip -r config.zip . -x ${{ inputs.exclude-files }}
 
       - name: Upload artifact
         uses: actions/upload-artifact@v3
