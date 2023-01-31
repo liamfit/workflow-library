@@ -1,0 +1,241 @@
+
+name: Terraform
+
+on:
+  workflow_call:
+    inputs:
+      working-directory:
+        description: "Directory to run Terraform commands from, if not the root directory of the repository. Also used for state file S3 prefix."
+        type: string
+        default: "."
+      environment:
+        description: "Deployment environment. Must match a named environment in the calling workflow."
+        required: true
+        type: string
+      terraform-version:
+        description: "Version of Terraform to use."
+        required: true
+        type: string
+      ignore-directories:
+        description: "Subdirectories of 'working-directory' to ignore when zipping Terraform config and plan files."
+        type: string
+        default: ".git"
+      comment-on-plan:
+        description: "Whether to add a comment to the pull request with details of the planned changes."
+        type: boolean
+        default: true
+      comment-on-apply:
+        description: "Whether to add a comment to the pull request with details of the applied changes."
+        type: boolean
+        default: true
+
+jobs:
+  plan:
+    name: Terraform Plan
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: ${{ inputs.terraform-version }}
+
+      - name: Terraform fmt
+        id: fmt
+        run: terraform fmt -check
+        continue-on-error: true
+
+      - name: Configure aws credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/${{ secrets.AWS_ROLE }}
+          role-session-name: ${{ github.run_id }}
+          aws-region: ${{ secrets.AWS_REGION }}
+      
+      - name: Set state file S3 prefix
+        if: inputs.working-directory == '.'
+        run: echo "S3_KEY=${GITHUB_REPOSITORY#*\/}$/terraform.tfstate" >> $GITHUB_ENV
+
+      - name: Set state file S3 prefix
+        if: inputs.working-directory != '.'
+        run: echo "S3_KEY=${GITHUB_REPOSITORY#*\/}/${{ inputs.working-directory }}${{ !endsWith(inputs.working-directory, '/') && '/' || '' }}terraform.tfstate" >> $GITHUB_ENV
+
+      - name: Terraform init
+        id: init
+        run: >
+          terraform init
+          -backend-config="region=${{ secrets.AWS_REGION }}"
+          -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}"
+          -backend-config="key=${S3_KEY}"
+
+      - name: Terraform validate
+        id: validate
+        run: terraform validate -no-color
+
+      - name: Terraform plan
+        id: plan
+        run: terraform plan -var="aws_region=${{ secrets.AWS_REGION }}" -no-color -out "tf_plan" -input=false
+        continue-on-error: true
+
+      - name: Set COMMENT to stdout if successful
+        if: github.event_name == 'pull_request' && steps.plan.outcome == 'success' && inputs.comment-on-plan
+        run: |
+          echo "COMMENT<<EOF" >> $GITHUB_ENV
+          echo "${{ steps.plan.outputs.stdout }}" >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+
+      - name: Set COMMENT to stderr if failed
+        if: github.event_name == 'pull_request' && steps.plan.outcome == 'failure' && inputs.comment-on-plan
+        run: |
+          echo "COMMENT<<EOF" >> $GITHUB_ENV
+          echo "${{ steps.plan.outputs.stderr }}" >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+
+      - name: Comment on PR
+        uses: actions/github-script@v6
+        if: github.event_name == 'pull_request' && inputs.comment-on-plan
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            // 1. Retrieve existing bot comments for the PR
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            })
+            const botComment = comments.find(comment => {
+              return comment.user.type === 'Bot' && comment.body.includes('Terraform Format and Style')
+            })
+
+            // 2. Prepare format of the comment
+            const output = `#### Terraform Format and Style 🖌\`${{ steps.fmt.outcome }}\`
+            #### Terraform Initialization ⚙️\`${{ steps.init.outcome }}\`
+            #### Terraform Validation 🤖\`${{ steps.validate.outcome }}\`
+            <details><summary>Validation Output</summary>
+
+            \`\`\`\n
+            ${{ steps.validate.outputs.stdout }}
+            \`\`\`
+
+            </details>
+
+            #### Terraform Plan 📖\`${{ steps.plan.outcome }}\`
+
+            <details><summary>Show Result</summary>
+
+            \`\`\`\n
+            ${process.env.COMMENT}
+            \`\`\`
+
+            </details>
+
+            *Pusher: @${{ github.actor }}, Action: \`${{ github.event_name }}\`, Workflow: \`${{ github.workflow }}\`*`;
+
+            // 3. If we have a comment, update it, otherwise create a new one
+            if (botComment) {
+              github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: botComment.id,
+                body: output
+              })
+            } else {
+              github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: output
+              })
+            }
+
+      - name: Check Terraform plan status
+        if: steps.plan.outcome == 'failure'
+        run: exit 1
+
+      - name: Zip Terraform plan and config files
+        run: zip -r config.zip . -x ".git*" "backend*"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: terraform-config
+          path: ${{ inputs.working-directory }}/config.zip
+
+  apply:
+    name: Terraform Apply
+    needs: plan
+    environment: ${{ inputs.environment }}
+    runs-on: ubuntu-latest    
+    steps:
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: ${{ inputs.terraform-version }}
+
+      - name: Configure aws credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/${{ secrets.AWS_ROLE }}
+          role-session-name: ${{ github.run_id }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Download artifact
+        uses: actions/download-artifact@v3
+        with:
+          name: terraform-config
+
+      - name: Extract Terraform plan and config files
+        run: unzip config.zip
+
+      - name: Terraform apply
+        id: apply
+        run: terraform apply -auto-approve -no-color -input=false tf_plan
+        continue-on-error: true
+
+      - name: Set COMMENT to stdout if successful
+        if: github.event_name == 'pull_request' && steps.apply.outcome == 'success' && inputs.comment-on-apply
+        run: |
+          echo "COMMENT<<EOF" >> $GITHUB_ENV
+          echo "${{ steps.apply.outputs.stdout }}" >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+
+      - name: Set COMMENT to stderr if failed
+        if: github.event_name == 'pull_request' && steps.apply.outcome == 'failure' && inputs.comment-on-apply
+        run: |
+          echo "COMMENT<<EOF" >> $GITHUB_ENV
+          echo "${{ steps.apply.outputs.stderr }}" >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+
+      - name: Comment on PR
+        uses: actions/github-script@v6
+        if: github.event_name == 'pull_request' && inputs.comment-on-apply
+        env:
+          APPLY: "terraform\n${{ steps.apply.outputs.stdout }}"
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const output = `#### Terraform Apply 🎬\`${{ steps.apply.outcome }}\`
+
+            <details><summary>Show Result</summary>
+            
+            \`\`\`\n
+            ${process.env.COMMENT}
+            \`\`\`
+
+            </details>
+            `;
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: output
+            })
+
+      - name: Check Terraform apply status
+        if: steps.apply.outcome == 'failure'
+        run: exit 1
