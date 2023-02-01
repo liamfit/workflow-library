@@ -65,7 +65,7 @@ jobs:
           --name terraform.tfvars.json \
           --query 'Parameter.Value' \
           --output text \
-          > terraform.tfvars.json \
+          > terraform.tfvars.json
           cat terraform.tfvars.json
       
       - name: Set state file S3 prefix
