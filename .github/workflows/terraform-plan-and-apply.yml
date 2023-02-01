@@ -58,13 +58,15 @@ jobs:
           aws-region: ${{ secrets.AWS_REGION }}
 
       - name: Get terraform.tfvars.json from SSM
-        run: >
-          aws ssm get-parameter
-          --with-decryption
-          --name terraform.tfvars.json
-          --query 'Parameter.Value'
-          --output text
-          > terraform.tfvars.json
+        run: |
+          pwd
+          aws ssm get-parameter \
+          --with-decryption \
+          --name terraform.tfvars.json \
+          --query 'Parameter.Value' \
+          --output text \
+          > terraform.tfvars.json \
+          cat terraform.tfvars.json
       
       - name: Set state file S3 prefix
         if: inputs.working-directory == '.'
