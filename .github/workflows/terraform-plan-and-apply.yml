@@ -19,7 +19,7 @@ on:
       exclude-files:
         description: "Files or subdirectories of 'working-directory' to exclude when zipping Terraform config and plan files."
         type: string
-        default: ''.git*''
+        default: '".git*"'
       comment-on-plan:
         description: "Whether to add a comment to the pull request with details of the planned changes."
         type: boolean
